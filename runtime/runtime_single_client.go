@@ -22,6 +22,10 @@ import (
 	"time"
 )
 
+const (
+	taskTimeout = 30 * time.Second
+)
+
 //TaskResponse ...
 type TaskResponse struct {
 	result string
@@ -66,10 +70,19 @@ func (s *SingleRuntime) handleIncommingJobs() {
 }
 
 func (s *SingleRuntime) readFromSocket(command string) (string, error) {
-	api, err := net.Dial("unix", s.socketPath)
-	if err != nil {
+	var api net.Conn
+	var err error
+
+	if api, err = net.DialTimeout("unix", s.socketPath, taskTimeout); err != nil {
 		return "", err
 	}
+	defer func() {
+		_ = api.Close()
+	}()
+	if err = api.SetDeadline(time.Now().Add(taskTimeout)); err != nil {
+		return "", err
+	}
+	
 	fullCommand := fmt.Sprintf("set severity-output number;%s\n", command)
 	if s.worker > 0 {
 		fullCommand = fmt.Sprintf("@%v set severity-output number;@%v %s\n", s.worker, s.worker, command)
@@ -154,14 +167,10 @@ func (s *SingleRuntime) executeRaw(command string, retry int) (string, error) {
 		response: response,
 	}
 	s.jobs <- Task
-	select {
-	case rsp := <-response:
-		if rsp.err != nil && retry > 0 {
-			retry--
-			return s.executeRaw(command, retry)
-		}
-		return rsp.result, rsp.err
-	case <-time.After(time.Duration(30) * time.Second):
-		return "", fmt.Errorf("timeout reached")
+	rsp := <-response
+	if rsp.err != nil && retry > 0 {
+		retry--
+		return s.executeRaw(command, retry)
 	}
+	return rsp.result, rsp.err
 }
